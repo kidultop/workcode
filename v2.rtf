@@ -1,0 +1,1520 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 ' Module 1: ControlPanel (Final Production Version)\
+' Author: [Your Name/Team]\
+' Date: [Date]\
+' Description: This module manages the primary user interface on the "Control Panel" sheet.\
+'              It is responsible for setting up the UI controls (buttons, dropdown placeholders)\
+'              and handling the logic for the cascading (dependent) dropdown lists.\
+Option Explicit\
+\
+' --- Public Constants (Accessible Project-Wide) ---\
+Public Const CP_SHEET_NAME As String = "Control Panel"\
+Public Const MASTER_SHEET_NAME As String = "ReAdm List"\
+Public Const RISK_SCORE_SHEET_NAME As String = "ReAdm Risk Score"\
+Public Const CALL_LIST_SHEET_NAME As String = "Call List"\
+\
+' --- MODIFIED: Final correct Filter Columns in MASTER_SHEET_NAME ---\
+Public Const WARD_FILTER_COL As String = "CO" ' Department (used as Ward filter)\
+Public Const MAIN_DEPT_FILTER_COL As String = "AG"\
+Public Const SUB_DEPT_FILTER_COL As String = "AF"\
+\
+' --- Private Constants for this Module ---\
+Private Const HELPER_SHEET_NAME As String = "FilterLists"\
+\
+' --- Main Setup Routine for Control Panel UI ---\
+Public Sub SetupControlPanelSheet()\
+    Dim wsCP As Worksheet\
+    Dim btnProcess As Button\
+    Dim btnAnalyze As Button\
+\
+    Application.ScreenUpdating = False\
+    Application.EnableEvents = False ' Disable events during UI setup\
+\
+    On Error Resume Next\
+    Set wsCP = ThisWorkbook.Sheets(CP_SHEET_NAME)\
+    On Error GoTo 0\
+\
+    If wsCP Is Nothing Then\
+        Set wsCP = ThisWorkbook.Sheets.Add(Before:=ThisWorkbook.Sheets(1))\
+        wsCP.Name = CP_SHEET_NAME\
+    Else\
+        Dim shp As Shape\
+        For Each shp In wsCP.Shapes\
+            shp.Delete\
+        Next shp\
+        wsCP.Cells.Clear\
+    End If\
+\
+    With wsCP\
+        .Range("A1").Value = "Hospital Readmission Analysis Dashboard"\
+        .Range("A1").Font.Bold = True\
+        .Range("A1").Font.Size = 16\
+        \
+        .Range("A3:A6").NumberFormat = "@"\
+        .Range("A3").Value = "Step 1: Update 'ReAdm Risk Score' and 'Call List' source data sheets."\
+        .Range("A4").Value = "Step 2: Click 'Process Latest Data' to consolidate all data into the 'ReAdm List' master sheet and populate filters."\
+        .Range("A5").Value = "Step 3: Use the cascading dropdowns below to select criteria. Lists will update automatically."\
+        .Range("A6").Value = "Step 4: Click 'Update Analysis & Charts' to generate the report for the current selection."\
+        .Range("A3:A6").Font.Italic = True\
+        .Range("A3:A6").WrapText = True\
+        .Columns("A").ColumnWidth = 60\
+        \
+        Set btnProcess = .Buttons.Add(.Range("B8").Left, .Range("B8").Top, 180, 30)\
+        With btnProcess\
+            .Caption = "Process Latest Data"\
+            .OnAction = "PrepareMasterData"\
+            .Name = "btnProcessData"\
+        End With\
+        \
+        Set btnAnalyze = .Buttons.Add(.Range("B14").Left, .Range("B14").Top, 200, 30)\
+        With btnAnalyze\
+            .Caption = "Update Analysis & Charts"\
+            .OnAction = "RunFullAnalysis"\
+            .Name = "btnUpdateAnalysis"\
+        End With\
+        \
+        ' MODIFIED: Updated filter labels as per user request\
+        .Range("A11").Value = "Ward Filter (" & WARD_FILTER_COL & "):"\
+        .Range("C11").Value = "Main Dept Filter (" & MAIN_DEPT_FILTER_COL & "):"\
+        .Range("E11").Value = "Sub Dept Filter (" & SUB_DEPT_FILTER_COL & "):"\
+        .Range("A11:F11").Font.Bold = True\
+        \
+        Dim dropdownCell As Range\
+        For Each dropdownCell In .Range("B11,D11,F11")\
+            With dropdownCell\
+                .Value = "[Run Process Data]"\
+                .Interior.Color = RGB(240, 240, 240)\
+                .Borders.LineStyle = xlContinuous\
+                .Borders.Weight = xlThin\
+                .HorizontalAlignment = xlLeft\
+            End With\
+        Next dropdownCell\
+        .Columns("B:F").ColumnWidth = 30\
+        .Rows("11").RowHeight = .Rows("11").RowHeight + 5\
+    End With\
+    \
+    Application.EnableEvents = True\
+    Application.ScreenUpdating = True\
+    MsgBox "'Control Panel' sheet has been set up successfully!", vbInformation\
+End Sub\
+\
+' --- Sub to Populate/Update All Dropdown Lists ---\
+Public Sub UpdateDropdowns()\
+    Dim wsMaster As Worksheet, wsCP As Worksheet, wsHelper As Worksheet\
+    Dim lastRowMaster As Long, i As Long, nextAvailableCol As Long\
+    Dim dictWard As Object, dictMain As Object, dictSub As Object\
+    Dim wardData As Variant, mainDeptData As Variant, subDeptData As Variant\
+    Dim currentWard As String, currentMain As String, currentSub As String\
+\
+    On Error GoTo ErrorHandler_UpdateDropdowns\
+    \
+    Application.ScreenUpdating = False\
+    Application.EnableEvents = False\
+\
+    Set wsCP = ThisWorkbook.Sheets(CP_SHEET_NAME)\
+    Set wsMaster = ThisWorkbook.Sheets(MASTER_SHEET_NAME)\
+    lastRowMaster = wsMaster.Cells(wsMaster.Rows.Count, "M").End(xlUp).row\
+    \
+    If lastRowMaster <= 1 Then\
+        GoTo CleanExit_UpdateDropdowns\
+    End If\
+    \
+    ' MODIFIED: Ensure data is loaded from the correct, distinct columns\
+    wardData = wsMaster.Range(WARD_FILTER_COL & "2:" & WARD_FILTER_COL & lastRowMaster).Value2\
+    mainDeptData = wsMaster.Range(MAIN_DEPT_FILTER_COL & "2:" & MAIN_DEPT_FILTER_COL & lastRowMaster).Value2\
+    subDeptData = wsMaster.Range(SUB_DEPT_FILTER_COL & "2:" & SUB_DEPT_FILTER_COL & lastRowMaster).Value2\
+    \
+    currentWard = CStr(wsCP.Range("B11").Value)\
+    currentMain = CStr(wsCP.Range("D11").Value)\
+    currentSub = CStr(wsCP.Range("F11").Value)\
+    \
+    Set dictWard = CreateObject("Scripting.Dictionary")\
+    dictWard.CompareMode = vbTextCompare\
+    dictWard.Add "All Wards", 1\
+    \
+    Set dictMain = CreateObject("Scripting.Dictionary")\
+    dictMain.CompareMode = vbTextCompare\
+    dictMain.Add "All Main Depts", 1\
+    \
+    Set dictSub = CreateObject("Scripting.Dictionary")\
+    dictSub.CompareMode = vbTextCompare\
+    dictSub.Add "All Sub Depts", 1\
+\
+    If IsArray(wardData) Then\
+        For i = 1 To UBound(wardData, 1)\
+            Dim wardVal As String: wardVal = CStr(wardData(i, 1))\
+            Dim mainVal As String: mainVal = CStr(mainDeptData(i, 1))\
+            Dim subVal As String: subVal = CStr(subDeptData(i, 1))\
+\
+            Dim passesWard As Boolean: passesWard = (currentWard = "All Wards" Or wardVal = currentWard)\
+            Dim passesMain As Boolean: passesMain = (currentMain = "All Main Depts" Or mainVal = currentMain)\
+            Dim passesSub As Boolean: passesSub = (currentSub = "All Sub Depts" Or subVal = currentSub)\
+            \
+            If passesMain And passesSub And Len(wardVal) > 0 And Not dictWard.Exists(wardVal) Then\
+                dictWard.Add wardVal, 1\
+            End If\
+            \
+            If passesWard And passesSub And Len(mainVal) > 0 And Not dictMain.Exists(mainVal) Then\
+                dictMain.Add mainVal, 1\
+            End If\
+            \
+            If passesWard And passesMain And Len(subVal) > 0 And Not dictSub.Exists(subVal) Then\
+                dictSub.Add subVal, 1\
+            End If\
+        Next i\
+    End If\
+    \
+    On Error Resume Next\
+    Set wsHelper = ThisWorkbook.Sheets(HELPER_SHEET_NAME)\
+    On Error GoTo 0\
+    \
+    If wsHelper Is Nothing Then\
+        Set wsHelper = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))\
+        wsHelper.Name = HELPER_SHEET_NAME\
+        wsHelper.Visible = xlSheetVeryHidden\
+    Else\
+        wsHelper.Cells.ClearContents\
+    End If\
+    nextAvailableCol = 1\
+    \
+    UpdateSingleDropdown wsCP.Range("B11"), "WardList", dictWard, wsHelper, nextAvailableCol\
+    nextAvailableCol = nextAvailableCol + 1\
+    \
+    UpdateSingleDropdown wsCP.Range("D11"), "MainDeptList", dictMain, wsHelper, nextAvailableCol\
+    nextAvailableCol = nextAvailableCol + 1\
+    \
+    UpdateSingleDropdown wsCP.Range("F11"), "SubDeptList", dictSub, wsHelper, nextAvailableCol\
+    \
+    If Not dictWard.Exists(wsCP.Range("B11").Value) Then wsCP.Range("B11").Value = "All Wards"\
+    If Not dictMain.Exists(wsCP.Range("D11").Value) Then wsCP.Range("D11").Value = "All Main Depts"\
+    If Not dictSub.Exists(wsCP.Range("F11").Value) Then wsCP.Range("F11").Value = "All Sub Depts"\
+\
+CleanExit_UpdateDropdowns:\
+    Application.EnableEvents = True\
+    Application.ScreenUpdating = True\
+    Set wsMaster = Nothing: Set wsCP = Nothing: Set wsHelper = Nothing\
+    Set dictWard = Nothing: Set dictMain = Nothing: Set dictSub = Nothing\
+    Exit Sub\
+ErrorHandler_UpdateDropdowns:\
+    MsgBox "An error occurred while updating dropdown lists: " & Err.Description, vbCritical\
+    Resume CleanExit_UpdateDropdowns\
+End Sub\
+\
+' --- Helper for updating a single dropdown (includes sorting) ---\
+Private Sub UpdateSingleDropdown(targetCell As Range, listName As String, dict As Object, wsHelper As Worksheet, targetCol As Long)\
+    Dim sortedKeys As Variant, arrList As Object, key As Variant, i As Long, tempArr() As String\
+    \
+    Set arrList = CreateObject("System.Collections.ArrayList")\
+    \
+    For Each key In dict.Keys\
+        If Not InStr(1, CStr(key), "All ", vbTextCompare) > 0 Then\
+            arrList.Add key\
+        End If\
+    Next key\
+    \
+    If arrList.Count > 0 Then\
+        arrList.Sort\
+    End If\
+    \
+    ReDim tempArr(0 To arrList.Count)\
+    tempArr(0) = GetKeyStartingWithAll(dict)\
+    \
+    For i = 0 To arrList.Count - 1\
+        tempArr(i + 1) = arrList(i)\
+    Next i\
+    sortedKeys = tempArr\
+    \
+    DeleteNamedRange listName\
+    CreateNamedRange listName, sortedKeys, wsHelper, targetCol\
+    \
+    With targetCell.Validation\
+        .Delete\
+        .Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, Operator:=xlBetween, Formula1:="=" & listName\
+        .IgnoreBlank = True\
+        .InCellDropdown = True\
+    End With\
+End Sub\
+\
+' --- Helper to get "All..." key from a dictionary ---\
+Private Function GetKeyStartingWithAll(dict As Object) As String\
+    Dim key As Variant\
+    For Each key In dict.Keys\
+        If InStr(1, CStr(key), "All ", vbTextCompare) > 0 Then\
+            GetKeyStartingWithAll = key\
+            Exit Function\
+        End If\
+    Next key\
+    GetKeyStartingWithAll = "(Not Found)"\
+End Function\
+\
+' --- Helper to Delete/Create Named Ranges ---\
+Private Sub DeleteNamedRange(nameString As String)\
+    Dim nm As Name\
+    On Error Resume Next\
+    Set nm = ThisWorkbook.Names(nameString)\
+    If Not nm Is Nothing Then\
+        nm.Delete\
+    End If\
+    On Error GoTo 0\
+End Sub\
+\
+Private Sub CreateNamedRange(nameString As String, arrValues As Variant, wsHelper As Worksheet, targetCol As Long)\
+    Dim listContentRange As Range, i As Long, lBoundArr As Long, uBoundArr As Long\
+    \
+    If wsHelper Is Nothing Or targetCol <= 0 Then Exit Sub\
+    \
+    On Error Resume Next\
+    lBoundArr = LBound(arrValues)\
+    uBoundArr = UBound(arrValues)\
+    If Err.Number <> 0 Then\
+        uBoundArr = -1\
+        lBoundArr = 0\
+        Err.Clear\
+    End If\
+    On Error GoTo 0\
+    \
+    If uBoundArr >= lBoundArr Then\
+        For i = lBoundArr To uBoundArr\
+            wsHelper.Cells(i - lBoundArr + 1, targetCol).Value = arrValues(i)\
+        Next i\
+        Set listContentRange = wsHelper.Range(wsHelper.Cells(1, targetCol), wsHelper.Cells(uBoundArr - lBoundArr + 1, targetCol))\
+    Else\
+        wsHelper.Cells(1, targetCol).Value = "(No valid options)"\
+        Set listContentRange = wsHelper.Cells(1, targetCol)\
+    End If\
+    \
+    ThisWorkbook.Names.Add Name:=nameString, RefersTo:=listContentRange, Visible:=False\
+End Sub\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+' Module 2: DataPreparation (Final Refactored Version)\
+' Author: [Your Name/Team]\
+' Date: [Date]\
+' Description: This module handles the new ETL process. It consolidates data from\
+'              "ReAdm Risk Score" and "Call List" into the "ReAdm List" master sheet.\
+Option Explicit\
+\
+' --- Main Data Preparation Routine ---\
+Public Sub PrepareMasterData()\
+    Dim proceed As VbMsgBoxResult\
+    \
+    On Error GoTo ErrorHandler_PrepareMasterData\
+    \
+    proceed = MsgBox("This will update the '" & MASTER_SHEET_NAME & "' sheet using data from '" & RISK_SCORE_SHEET_NAME & "' and '" & CALL_LIST_SHEET_NAME & "'." & vbNewLine & _\
+                   "Any existing data in the target columns will be overwritten." & vbNewLine & vbNewLine & _\
+                   "Do you want to continue?", vbYesNo + vbQuestion, "Confirm Data Processing")\
+                   \
+    If proceed = vbNo Then\
+        MsgBox "Data processing cancelled by user.", vbInformation\
+        GoTo CleanExit_PrepareMasterData\
+    End If\
+    \
+    ' Set application properties for performance\
+    Application.ScreenUpdating = False\
+    Application.Calculation = xlCalculationManual\
+    Application.DisplayAlerts = False\
+    \
+    Application.StatusBar = "Starting data consolidation..."\
+    \
+    ' Step 1: Consolidate Department from Risk Score sheet\
+    Application.StatusBar = "Step 1/3: Consolidating Department data..."\
+    Call ConsolidateSingleColumnData(RISK_SCORE_SHEET_NAME, "E", "F", MASTER_SHEET_NAME, "M", "CO")\
+    \
+    ' Step 2: Consolidate Risk Score from Risk Score sheet\
+    Application.StatusBar = "Step 2/3: Consolidating Risk Scores..."\
+    Call ConsolidateSingleColumnData(RISK_SCORE_SHEET_NAME, "E", "T", MASTER_SHEET_NAME, "M", "CP")\
+    \
+    ' Step 3: Consolidate Call List data\
+    Application.StatusBar = "Step 3/3: Consolidating Follow-up Call List..."\
+    Call MergeCallListData() ' Using a dedicated sub for this specific, non-contiguous merge\
+    \
+    Application.StatusBar = "Populating initial filter dropdowns..."\
+    DoEvents\
+    Call ControlPanel.UpdateDropdowns\
+    \
+    MsgBox "Data consolidation and initial filter setup completed successfully!", vbInformation\
+\
+CleanExit_PrepareMasterData:\
+    ' Restore application properties\
+    Application.StatusBar = False\
+    Application.Calculation = xlCalculationAutomatic\
+    Application.ScreenUpdating = True\
+    Application.DisplayAlerts = True\
+    Exit Sub\
+ErrorHandler_PrepareMasterData:\
+    MsgBox "An error occurred in the main data preparation process: " & vbNewLine & Err.Description, vbCritical\
+    Resume CleanExit_PrepareMasterData\
+End Sub\
+\
+' --- Generic Data Consolidation Sub for SINGLE-COLUMN data ---\
+Private Sub ConsolidateSingleColumnData(sourceSheetName As String, sourceKeyCol As String, sourceDataCol As String, _\
+                                     targetSheetName As String, targetKeyCol As String, targetPasteCol As String)\
+    Dim wsSource As Worksheet, wsTarget As Worksheet\
+    Dim lastRowSource As Long, lastRowTarget As Long, i As Long\
+    Dim sourceKeyArray As Variant, sourceDataArray As Variant, targetKeyArray As Variant\
+    Dim targetDict As Object\
+\
+    On Error GoTo ErrorHandler_ConsolidateData\
+\
+    On Error Resume Next\
+    Set wsSource = ThisWorkbook.Sheets(sourceSheetName)\
+    If wsSource Is Nothing Then MsgBox "Source sheet '" & sourceSheetName & "' not found. Skipping.", vbInformation: GoTo CleanExit_ConsolidateData\
+    Set wsTarget = ThisWorkbook.Sheets(targetSheetName)\
+    If wsTarget Is Nothing Then MsgBox "Target sheet '" & targetSheetName & "' not found. Cannot proceed.", vbExclamation: GoTo CleanExit_ConsolidateData\
+    On Error GoTo ErrorHandler_ConsolidateData\
+\
+    lastRowSource = wsSource.Cells(wsSource.Rows.Count, sourceKeyCol).End(xlUp).row\
+    lastRowTarget = wsTarget.Cells(wsTarget.Rows.Count, targetKeyCol).End(xlUp).row\
+    If lastRowSource <= 1 Or lastRowTarget <= 1 Then GoTo CleanExit_ConsolidateData\
+\
+    sourceKeyArray = wsSource.Range(sourceKeyCol & "2:" & sourceKeyCol & lastRowSource).Value2\
+    sourceDataArray = wsSource.Range(sourceDataCol & "2:" & sourceDataCol & lastRowSource).Value2\
+    \
+    Set targetDict = CreateObject("Scripting.Dictionary")\
+    targetDict.CompareMode = vbTextCompare\
+    targetKeyArray = wsTarget.Range(targetKeyCol & "2:" & targetKeyCol & lastRowTarget).Value2\
+    For i = 1 To UBound(targetKeyArray, 1)\
+        Dim stdTargetKey As String: stdTargetKey = StandardizeID(targetKeyArray(i, 1))\
+        If Len(stdTargetKey) > 0 And Not targetDict.Exists(stdTargetKey) Then\
+            targetDict.Add stdTargetKey, i + 1 ' Store row number\
+        End If\
+    Next i\
+    \
+    wsTarget.Columns(targetPasteCol).ClearContents\
+    wsSource.Range(sourceDataCol & "1").Copy wsTarget.Range(targetPasteCol & "1")\
+\
+    For i = 1 To UBound(sourceKeyArray, 1)\
+        Dim stdSourceKey As String: stdSourceKey = StandardizeID(sourceKeyArray(i, 1))\
+        If Len(stdSourceKey) > 0 And targetDict.Exists(stdSourceKey) Then\
+            Dim targetRow As Long: targetRow = targetDict(stdSourceKey)\
+            wsTarget.Range(targetPasteCol & targetRow).Value = sourceDataArray(i, 1)\
+        End If\
+    Next i\
+\
+CleanExit_ConsolidateData:\
+    Set wsSource = Nothing: Set wsTarget = Nothing: Set targetDict = Nothing\
+    Erase sourceKeyArray, sourceDataArray, targetKeyArray\
+    Exit Sub\
+ErrorHandler_ConsolidateData:\
+    MsgBox "An error occurred in ConsolidateData for '" & sourceSheetName & "': " & vbNewLine & Err.Description, vbCritical\
+    Resume CleanExit_ConsolidateData\
+End Sub\
+\
+' --- NEW DEDICATED Sub for Call List merge (non-contiguous columns) ---\
+Private Sub MergeCallListData()\
+    Dim wsSource As Worksheet, wsTarget As Worksheet\
+    Dim lastRowSource As Long, lastRowTarget As Long, i As Long\
+    Dim sourceKeyArray As Variant, targetKeyArray As Variant, targetDict As Object\
+    \
+    On Error GoTo ErrorHandler_MergeCallList\
+\
+    Set wsSource = ThisWorkbook.Sheets(CALL_LIST_SHEET_NAME)\
+    Set wsTarget = ThisWorkbook.Sheets(MASTER_SHEET_NAME)\
+\
+    lastRowSource = wsSource.Cells(wsSource.Rows.Count, "E").End(xlUp).row\
+    lastRowTarget = wsTarget.Cells(wsTarget.Rows.Count, "M").End(xlUp).row\
+    If lastRowSource <= 1 Or lastRowTarget <= 1 Then GoTo CleanExit_MergeCallList\
+\
+    sourceKeyArray = wsSource.Range("E2:E" & lastRowSource).Value2\
+    \
+    Dim sourceDataArray As Variant\
+    sourceDataArray = wsSource.Range("A2:J" & lastRowSource).Value2\
+    \
+    Set targetDict = CreateObject("Scripting.Dictionary")\
+    targetDict.CompareMode = vbTextCompare\
+    targetKeyArray = wsTarget.Range("M2:M" & lastRowTarget).Value2\
+    For i = 1 To UBound(targetKeyArray, 1)\
+        Dim stdTargetKey As String: stdTargetKey = StandardizeID(targetKeyArray(i, 1))\
+        If Len(stdTargetKey) > 0 And Not targetDict.Exists(stdTargetKey) Then\
+            targetDict.Add stdTargetKey, i + 1\
+        End If\
+    Next i\
+    \
+    wsTarget.Range("CQ1:CW" & lastRowTarget + 10).ClearContents\
+    ' MODIFIED: Correctly copy headers for non-contiguous columns\
+    wsTarget.Range("CQ1").Value = wsSource.Range("B1").Value ' Ward\
+    wsTarget.Range("CR1").Value = wsSource.Range("C1").Value ' Bed No.\
+    wsTarget.Range("CS1").Value = wsSource.Range("D1").Value ' Name\
+    wsTarget.Range("CT1").Value = wsSource.Range("F1").Value ' Destination\
+    wsTarget.Range("CU1").Value = wsSource.Range("G1").Value ' Need for follow up call?\
+    wsTarget.Range("CV1").Value = wsSource.Range("I1").Value ' Completion date\
+    wsTarget.Range("CW1").Value = wsSource.Range("J1").Value ' Outcomes\
+    wsTarget.Range("CQ1:CW1").Font.Bold = True\
+\
+    For i = 1 To UBound(sourceKeyArray, 1)\
+        Dim stdSourceKey As String: stdSourceKey = StandardizeID(sourceKeyArray(i, 1))\
+        If Len(stdSourceKey) > 0 And targetDict.Exists(stdSourceKey) Then\
+            Dim targetRow As Long: targetRow = targetDict(stdSourceKey)\
+            wsTarget.Cells(targetRow, "CQ").Value = sourceDataArray(i, 2)  ' Col B in source\
+            wsTarget.Cells(targetRow, "CR").Value = sourceDataArray(i, 3)  ' Col C\
+            wsTarget.Cells(targetRow, "CS").Value = sourceDataArray(i, 4)  ' Col D\
+            wsTarget.Cells(targetRow, "CT").Value = sourceDataArray(i, 6)  ' Col F\
+            wsTarget.Cells(targetRow, "CU").Value = sourceDataArray(i, 7)  ' Col G\
+            wsTarget.Cells(targetRow, "CV").Value = sourceDataArray(i, 9)  ' Col I\
+            wsTarget.Cells(targetRow, "CW").Value = sourceDataArray(i, 10) ' Col J\
+        End If\
+    Next i\
+\
+CleanExit_MergeCallList:\
+    Set wsSource = Nothing: Set wsTarget = Nothing: Set targetDict = Nothing\
+    Erase sourceKeyArray, sourceDataArray, targetKeyArray\
+    Exit Sub\
+ErrorHandler_MergeCallList:\
+    MsgBox "An error occurred in MergeCallListData: " & vbNewLine & Err.Description, vbCritical\
+    Resume CleanExit_MergeCallList\
+End Sub\
+\
+' --- Helper: Standardize ID ---\
+Public Function StandardizeID(inputValue As Variant) As String\
+    Dim cleanStr As String\
+    If IsError(inputValue) Or IsEmpty(inputValue) Or IsNull(inputValue) Then\
+        StandardizeID = ""\
+        Exit Function\
+    End If\
+    cleanStr = Trim(CStr(inputValue))\
+    If Len(cleanStr) = 0 Then\
+        StandardizeID = ""\
+        Exit Function\
+    End If\
+    cleanStr = Replace(cleanStr, " ", "")\
+    cleanStr = Replace(cleanStr, "-", "")\
+    cleanStr = Replace(cleanStr, ".", "")\
+    If IsNumeric(Left(cleanStr, 1)) And InStr(1, cleanStr, "E", vbTextCompare) > 0 Then\
+        On Error Resume Next\
+        Dim tempDouble As Double\
+        tempDouble = CDbl(cleanStr)\
+        If Err.Number = 0 Then\
+            cleanStr = Format(tempDouble, "0")\
+        End If\
+        Err.Clear\
+        On Error GoTo 0\
+    End If\
+    StandardizeID = cleanStr\
+End Function\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+' Module 3: Analysis (Final Refactored Version)\
+' Author: [Your Name/Team]\
+' Date: [Date]\
+' Description: This module reads from the "ReAdm List" master sheet to perform all analysis\
+'              and generate dynamic reports with tables, charts, and summaries.\
+Option Explicit\
+\
+' --- Helper Functions for Array Handling ---\
+Private Function IsArrayInitialized(arr As Variant) As Boolean\
+    IsArrayInitialized = False: If IsArray(arr) Then On Error Resume Next: Dim lb As Long: lb = LBound(arr, 1): If Err.Number = 0 Then IsArrayInitialized = True: Err.Clear: On Error GoTo 0\
+End Function\
+\
+Private Function IsArrayEmpty(arr As Variant) As Boolean\
+    If IsEmpty(arr) Then IsArrayEmpty = True: Exit Function\
+    If Not IsArrayInitialized(arr) Then IsArrayEmpty = True: Exit Function\
+    On Error Resume Next: If LBound(arr, 1) > UBound(arr, 1) Then IsArrayEmpty = True Else IsArrayEmpty = False\
+    If Err.Number <> 0 Then IsArrayEmpty = True: Err.Clear\
+    On Error GoTo 0\
+End Function\
+\
+' --- MAIN PUBLIC SUB CALLED BY THE BUTTON ON CONTROL PANEL ---\
+Public Sub RunFullAnalysis()\
+    Dim wsCP As Worksheet, wsMaster As Worksheet, createdAnalysisWs As Worksheet\
+    Dim wardFilter As String, mainDeptFilter As String, subDeptFilter As String\
+    Dim baseSheetName As String, sheetSuffix As String, dynamicSheetName As String, tabColorValue As Long\
+    \
+    On Error GoTo ErrorHandler_RunFullAnalysis\
+    \
+    Application.ScreenUpdating = False\
+    Application.Calculation = xlCalculationManual\
+    Application.DisplayAlerts = False\
+    Application.StatusBar = "Starting analysis..."\
+    \
+    Set wsCP = ThisWorkbook.Sheets(CP_SHEET_NAME)\
+    Set wsMaster = ThisWorkbook.Sheets(MASTER_SHEET_NAME)\
+    \
+    wardFilter = CStr(wsCP.Range("B11").Value)\
+    mainDeptFilter = CStr(wsCP.Range("D11").Value)\
+    subDeptFilter = CStr(wsCP.Range("F11").Value)\
+    \
+    If Left(wardFilter, 1) = "[" Or InStr(1, wardFilter, "Process", vbTextCompare) > 0 Or Left(mainDeptFilter, 1) = "[" Or InStr(1, mainDeptFilter, "Process", vbTextCompare) > 0 Or Left(subDeptFilter, 1) = "[" Or InStr(1, subDeptFilter, "Process", vbTextCompare) > 0 Then\
+        MsgBox "Please select valid options for all filters on the '" & CP_SHEET_NAME & "' sheet.", vbExclamation\
+        GoTo CleanExit_RunFullAnalysis\
+    End If\
+    \
+    baseSheetName = "ScoreAnalysis"\
+    \
+    If wardFilter = "All Wards" And mainDeptFilter = "All Main Depts" And subDeptFilter = "All Sub Depts" Then\
+        sheetSuffix = "_Overall": tabColorValue = RGB(220, 220, 220)\
+    ElseIf subDeptFilter <> "All Sub Depts" And mainDeptFilter = "All Main Depts" And wardFilter = "All Wards" Then\
+        sheetSuffix = "_SubDept": tabColorValue = RGB(255, 192, 0)\
+    ElseIf mainDeptFilter <> "All Main Depts" And subDeptFilter = "All Sub Depts" And wardFilter = "All Wards" Then\
+        sheetSuffix = "_MainDept": tabColorValue = RGB(146, 208, 80)\
+    ElseIf wardFilter <> "All Wards" And mainDeptFilter = "All Main Depts" And subDeptFilter = "All Sub Depts" Then\
+        sheetSuffix = "_Ward": tabColorValue = RGB(0, 176, 240)\
+    Else\
+        sheetSuffix = "_Combined": tabColorValue = RGB(160, 160, 160)\
+    End If\
+    dynamicSheetName = Left(baseSheetName & sheetSuffix, 31)\
+    \
+    Application.StatusBar = "Calling main analysis logic for: " & dynamicSheetName\
+    Call Analyze_ROC_AUC_Main(wsMaster, wardFilter, mainDeptFilter, subDeptFilter, dynamicSheetName)\
+    \
+    On Error Resume Next\
+    Set createdAnalysisWs = Nothing\
+    Set createdAnalysisWs = ThisWorkbook.Sheets(dynamicSheetName)\
+    If Err.Number = 0 And Not createdAnalysisWs Is Nothing Then\
+        createdAnalysisWs.Tab.Color = tabColorValue\
+    End If\
+    On Error GoTo ErrorHandler_RunFullAnalysis\
+\
+CleanExit_RunFullAnalysis:\
+    Application.StatusBar = False\
+    Application.Calculation = xlCalculationAutomatic\
+    Application.ScreenUpdating = True\
+    Application.DisplayAlerts = True\
+    Set wsCP = Nothing\
+    Set wsMaster = Nothing\
+    Set createdAnalysisWs = Nothing\
+    Exit Sub\
+ErrorHandler_RunFullAnalysis:\
+    MsgBox "An error occurred in RunFullAnalysis: " & vbNewLine & Err.Description, vbCritical\
+    Resume CleanExit_RunFullAnalysis\
+End Sub\
+\
+' --- CORE PRIVATE ANALYSIS LOGIC ---\
+Private Sub Analyze_ROC_AUC_Main(wsMaster As Worksheet, wardF As String, mainDeptF As String, subDeptF As String, ByVal targetSheetName As String)\
+    Dim lastRow As Long, i As Long, k As Long, r As Long, c As Long\
+    Dim allData As Variant, filteredData() As Variant, overallData() As Variant, calledData() As Variant, notCalledData() As Variant\
+    Dim tempFilteredData() As Variant, tempCalledData() As Variant, tempNotCalledData() As Variant\
+    Dim totalRecordsFound As Long, filteredCount As Long, calledCount As Long, notCalledCount As Long\
+    Dim analysisWs As Worksheet, overallResults() As Variant, calledResults() As Variant, notCalledResults() As Variant\
+    Dim overallAUC As Double, calledAUC As Double, notCalledAUC As Double\
+    Dim overallSummary As String, calledSummary As String, notCalledSummary As String\
+    Dim overallStatOptimal As Double, overallResOptimal As Double, calledStatOptimal As Double, calledResOptimal As Double, notCalledStatOptimal As Double, notCalledResOptimal As Double\
+    \
+    ' --- MODIFIED: New Column Constants for "ReAdm List" ---\
+    Dim COL_WARD_FILTER As Long, COL_MAIN_DEPT_FILTER As Long, COL_SUB_DEPT_FILTER As Long\
+    Dim COL_RISK_SCORE As Long, COL_READM_OUTCOME As Long, COL_FOLLOWUP_DATE As Long, maxColNeeded As Long\
+    \
+    On Error GoTo ErrorHandler_AnalyzeMain\
+    \
+    ' Dynamically find column numbers based on headers in the master sheet\
+    COL_WARD_FILTER = wsMaster.Range(WARD_FILTER_COL & "1").Column\
+    COL_MAIN_DEPT_FILTER = wsMaster.Range(MAIN_DEPT_FILTER_COL & "1").Column\
+    COL_SUB_DEPT_FILTER = wsMaster.Range(SUB_DEPT_FILTER_COL & "1").Column\
+    COL_RISK_SCORE = wsMaster.Range("CP1").Column\
+    COL_READM_OUTCOME = wsMaster.Range("AZ1").Column\
+    COL_FOLLOWUP_DATE = wsMaster.Range("CV1").Column\
+    \
+    maxColNeeded = Application.WorksheetFunction.Max(COL_WARD_FILTER, COL_MAIN_DEPT_FILTER, COL_SUB_DEPT_FILTER, COL_RISK_SCORE, COL_READM_OUTCOME, COL_FOLLOWUP_DATE)\
+    \
+    Application.StatusBar = "Loading data from master list..."\
+    lastRow = wsMaster.Cells(wsMaster.Rows.Count, "M").End(xlUp).row ' Use key column for last row\
+    \
+    If lastRow <= 1 Then\
+        MsgBox "No data rows in '" & MASTER_SHEET_NAME & "'.", vbExclamation\
+        GoTo CleanExit_AnalyzeMain\
+    End If\
+    \
+    allData = wsMaster.Range(wsMaster.Cells(2, 1), wsMaster.Cells(lastRow, maxColNeeded)).Value2\
+    \
+    Application.StatusBar = "Filtering data..."\
+    ReDim filteredData(1 To UBound(allData, 1), 1 To 3)\
+    filteredCount = 0\
+    totalRecordsFound = 0\
+    \
+    For i = 1 To UBound(allData, 1)\
+        Dim passesFilter As Boolean: passesFilter = True\
+        If wardF <> "All Wards" Then\
+            If CStr(allData(i, COL_WARD_FILTER)) <> wardF Then\
+                passesFilter = False\
+            End If\
+        End If\
+        If passesFilter And mainDeptF <> "All Main Depts" Then\
+            If CStr(allData(i, COL_MAIN_DEPT_FILTER)) <> mainDeptF Then\
+                passesFilter = False\
+            End If\
+        End If\
+        If passesFilter And subDeptF <> "All Sub Depts" Then\
+            If CStr(allData(i, COL_SUB_DEPT_FILTER)) <> subDeptF Then\
+                passesFilter = False\
+            End If\
+        End If\
+        \
+        If passesFilter Then\
+            totalRecordsFound = totalRecordsFound + 1\
+            Dim tempScoreValue As String, score As Double, isReadmitted As Integer, isFollowUpFlag As Integer\
+            If Not IsEmpty(allData(i, COL_RISK_SCORE)) Then\
+                tempScoreValue = CStr(allData(i, COL_RISK_SCORE))\
+                If Right(tempScoreValue, 1) = "%" Then\
+                    tempScoreValue = Left(tempScoreValue, Len(tempScoreValue) - 1)\
+                End If\
+                \
+                If IsNumeric(tempScoreValue) Then\
+                    score = CDbl(tempScoreValue)\
+                    isReadmitted = IIf(Len(Trim(CStr(allData(i, COL_READM_OUTCOME)))) > 0, 1, 0)\
+                    If IsDate(allData(i, COL_FOLLOWUP_DATE)) Then\
+                        isFollowUpFlag = 1\
+                    Else\
+                        isFollowUpFlag = 0\
+                    End If\
+                    filteredCount = filteredCount + 1\
+                    filteredData(filteredCount, 1) = score\
+                    filteredData(filteredCount, 2) = isReadmitted\
+                    filteredData(filteredCount, 3) = isFollowUpFlag\
+                End If\
+            End If\
+        End If\
+    Next i\
+    \
+    If filteredCount <= 0 Then\
+        MsgBox "No data with valid risk scores matches the selected filters for '" & targetSheetName & "'. An empty report sheet will be created.", vbInformation\
+        Set analysisWs = CreateOrClearSheet(targetSheetName)\
+        With analysisWs\
+            .Range("A1").Value = "No data with valid scores for the selected filters:"\
+            .Range("A1").Font.Bold = True\
+            .Range("B2").Value = "Ward: " & wardF\
+            .Range("B3").Value = "Main Dept: " & mainDeptF\
+            .Range("B4").Value = "Sub Dept: " & subDeptF\
+            .Columns("A:B").AutoFit\
+        End With\
+        GoTo CleanExit_AnalyzeMain\
+    End If\
+    \
+    If IsArrayInitialized(filteredData) And filteredCount <> UBound(filteredData, 1) Then\
+        ReDim tempFilteredData(1 To filteredCount, 1 To 3)\
+        Dim rCopy As Long, cCopy As Long\
+        For rCopy = 1 To filteredCount\
+            For cCopy = 1 To 3\
+                tempFilteredData(rCopy, cCopy) = filteredData(rCopy, cCopy)\
+            Next cCopy\
+        Next rCopy\
+        Erase filteredData\
+        filteredData = tempFilteredData\
+    End If\
+    \
+    Application.StatusBar = "Grouping data..."\
+    ReDim overallData(1 To filteredCount, 1 To 2)\
+    ReDim calledData(1 To filteredCount, 1 To 2)\
+    ReDim notCalledData(1 To filteredCount, 1 To 2)\
+    calledCount = 0\
+    notCalledCount = 0\
+    \
+    For k = 1 To filteredCount\
+        overallData(k, 1) = filteredData(k, 1)\
+        overallData(k, 2) = filteredData(k, 2)\
+        If filteredData(k, 3) = 1 Then\
+            calledCount = calledCount + 1\
+            calledData(calledCount, 1) = filteredData(k, 1)\
+            calledData(calledCount, 2) = filteredData(k, 2)\
+        Else\
+            notCalledCount = notCalledCount + 1\
+            notCalledData(notCalledCount, 1) = filteredData(k, 1)\
+            notCalledData(notCalledCount, 2) = filteredData(k, 2)\
+        End If\
+        If k Mod 500 = 0 Then\
+            Application.StatusBar = "Grouping... Record " & k & "/" & filteredCount\
+            DoEvents\
+        End If\
+    Next k\
+    \
+    If calledCount > 0 Then\
+        ReDim tempCalledData(1 To calledCount, 1 To 2)\
+        For r = 1 To calledCount\
+            tempCalledData(r, 1) = calledData(r, 1)\
+            tempCalledData(r, 2) = calledData(r, 2)\
+        Next r\
+        Erase calledData\
+        calledData = tempCalledData\
+    Else\
+        Erase calledData\
+    End If\
+    \
+    If notCalledCount > 0 Then\
+        ReDim tempNotCalledData(1 To notCalledCount, 1 To 2)\
+        For r = 1 To notCalledCount\
+            tempNotCalledData(r, 1) = notCalledData(r, 1)\
+            tempNotCalledData(r, 2) = notCalledData(r, 2)\
+        Next r\
+        Erase notCalledData\
+        notCalledData = tempNotCalledData\
+    Else\
+        Erase notCalledData\
+    End If\
+    \
+    Application.StatusBar = "Performing ROC analysis..."\
+    If filteredCount > 0 Then\
+        Call PerformROCAnalysis(overallData, overallResults, overallAUC, overallSummary, overallStatOptimal, overallResOptimal)\
+    End If\
+    If calledCount > 0 Then\
+        Call PerformROCAnalysis(calledData, calledResults, calledAUC, calledSummary, calledStatOptimal, calledResOptimal)\
+    End If\
+    If notCalledCount > 0 Then\
+        Call PerformROCAnalysis(notCalledData, notCalledResults, notCalledAUC, notCalledSummary, notCalledStatOptimal, notCalledResOptimal)\
+    End If\
+    \
+    Application.StatusBar = "Generating output sheet '" & targetSheetName & "'..."\
+    Set analysisWs = CreateOrClearSheet(targetSheetName)\
+    If analysisWs Is Nothing Then GoTo CleanExit_AnalyzeMain\
+    \
+    With analysisWs\
+        .Range("A1").Value = "Analysis Results For Filters:"\
+        .Range("A1").Font.Bold = True\
+        .Range("B1").Value = "Ward/Dept (" & WARD_FILTER_COL & "): " & wardF\
+        .Range("C1").Value = "Main Dept (" & MAIN_DEPT_FILTER_COL & "): " & mainDeptF\
+        .Range("D1").Value = "Sub Dept (" & SUB_DEPT_FILTER_COL & "): " & subDeptF\
+        .Range("A1:E1").Interior.Color = RGB(230, 230, 230)\
+        .Range("A1:E1").Borders(xlEdgeBottom).LineStyle = xlContinuous\
+    End With\
+    \
+    Application.StatusBar = "Creating tables..."\
+    Call CreateROCTables(analysisWs, overallResults, calledResults, notCalledResults, overallStatOptimal, overallResOptimal, calledStatOptimal, calledResOptimal, notCalledStatOptimal, notCalledResOptimal)\
+    \
+    Application.StatusBar = "Creating charts..."\
+    Call CreateROCCharts(analysisWs, overallResults, calledResults, notCalledResults, overallAUC, calledAUC, notCalledAUC)\
+    \
+    Application.StatusBar = "Creating summary..."\
+    Call CreateSummaryTable(analysisWs, overallSummary, calledSummary, notCalledSummary)\
+    \
+    Application.StatusBar = "Writing data notes..."\
+    Call WriteDataNotes(analysisWs, totalRecordsFound, filteredCount)\
+    \
+    Application.StatusBar = "Analysis successfully completed!"\
+    If Not analysisWs Is Nothing Then\
+        analysisWs.Activate\
+    End If\
+    MsgBox "Analysis completed. Results are on sheet: '" & targetSheetName & "'.", vbInformation\
+    \
+CleanExit_AnalyzeMain:\
+    Application.StatusBar = False\
+    Erase allData, filteredData, overallData, calledData, notCalledData\
+    Erase tempFilteredData, tempCalledData, tempNotCalledData\
+    Erase overallResults, calledResults, notCalledResults\
+    Set analysisWs = Nothing\
+    Exit Sub\
+ErrorHandler_AnalyzeMain:\
+   MsgBox "An error occurred in Analyze_ROC_AUC_Main: " & vbNewLine & Err.Description, vbCritical\
+   Resume CleanExit_AnalyzeMain\
+End Sub\
+\
+' --- Sub-routine to Perform ROC Analysis ---\
+Private Sub PerformROCAnalysis(sourceData() As Variant, ByRef resultsOutputTable() As Variant, ByRef calculatedAUC As Double, ByRef summaryStatsString As String, ByRef statisticalOptimal As Double, ByRef resourceOptimal As Double)\
+    ' This sub's logic remains the same as v1, as it's data-agnostic.\
+    ' Included for completeness.\
+    Const RESOURCE_TARGET_RATIO As Double = 0.2\
+    Dim i As Long, currentThreshold As Long, totalPatientsInGroup As Long, totalReadmittedInGroup As Long\
+    Dim patientsAboveThreshold As Long, readmittedAboveThreshold As Long, nonReadmittedAboveThreshold As Long, totalNonReadmittedInGroup As Long\
+    Dim TPR As Double, FPR As Double, roc_TPR_Array() As Double, roc_FPR_Array() As Double, rocArrayIndex As Long\
+    Dim scoresArray() As Double, resultsArray() As Integer\
+    Dim minScore As Double, maxScore As Double, avgScore As Double\
+    \
+    On Error GoTo ErrorHandler_PerformROC\
+    \
+    If IsArrayEmpty(sourceData) Then GoTo CleanExit_PerformROC\
+    \
+    totalPatientsInGroup = UBound(sourceData, 1) - LBound(sourceData, 1) + 1\
+    If totalPatientsInGroup = 0 Then GoTo CleanExit_PerformROC\
+    \
+    ReDim scoresArray(1 To totalPatientsInGroup)\
+    ReDim resultsArray(1 To totalPatientsInGroup)\
+    totalReadmittedInGroup = 0\
+    \
+    For i = 1 To totalPatientsInGroup\
+        scoresArray(i) = sourceData(LBound(sourceData, 1) + i - 1, 1)\
+        resultsArray(i) = sourceData(LBound(sourceData, 1) + i - 1, 2)\
+        If resultsArray(i) = 1 Then\
+            totalReadmittedInGroup = totalReadmittedInGroup + 1\
+        End If\
+    Next i\
+    \
+    If totalPatientsInGroup > 0 Then\
+        On Error Resume Next\
+        minScore = Application.WorksheetFunction.Min(scoresArray)\
+        maxScore = Application.WorksheetFunction.Max(scoresArray)\
+        avgScore = Application.WorksheetFunction.Average(scoresArray)\
+        If Err.Number <> 0 Then\
+            minScore = 0: maxScore = 0: avgScore = 0\
+            Err.Clear\
+        End If\
+        On Error GoTo ErrorHandler_PerformROC\
+    Else\
+        minScore = 0: maxScore = 0: avgScore = 0\
+    End If\
+\
+    ReDim roc_TPR_Array(0 To 20)\
+    ReDim roc_FPR_Array(0 To 20)\
+    ReDim resultsOutputTable(0 To 21, 1 To 11)\
+    rocArrayIndex = 0\
+    \
+    resultsOutputTable(0, 1) = "Risk Score Threshold (%)"\
+    resultsOutputTable(0, 2) = "Total Patients in Group"\
+    resultsOutputTable(0, 3) = "Patients Above Threshold"\
+    resultsOutputTable(0, 4) = "Readmitted Above Threshold"\
+    resultsOutputTable(0, 5) = "Non-Readmitted Above Threshold"\
+    resultsOutputTable(0, 6) = "Patients Below Threshold"\
+    resultsOutputTable(0, 7) = "Readmitted Below Threshold"\
+    resultsOutputTable(0, 8) = "Non-Readmitted Below Threshold"\
+    resultsOutputTable(0, 9) = "TPR (Sensitivity)"\
+    resultsOutputTable(0, 10) = "FPR (1-Specificity)"\
+    resultsOutputTable(0, 11) = "Actual Readm. Rate (Above Thresh.)"\
+    \
+    For currentThreshold = 0 To 100 Step 5\
+        patientsAboveThreshold = 0\
+        readmittedAboveThreshold = 0\
+        For i = 1 To totalPatientsInGroup\
+            If scoresArray(i) >= currentThreshold Then\
+                patientsAboveThreshold = patientsAboveThreshold + 1\
+                If resultsArray(i) = 1 Then\
+                    readmittedAboveThreshold = readmittedAboveThreshold + 1\
+                End If\
+            End If\
+        Next i\
+        nonReadmittedAboveThreshold = patientsAboveThreshold - readmittedAboveThreshold\
+        \
+        If totalReadmittedInGroup = 0 Then\
+            TPR = 0\
+        Else\
+            TPR = CDbl(readmittedAboveThreshold) / CDbl(totalReadmittedInGroup)\
+        End If\
+        \
+        totalNonReadmittedInGroup = totalPatientsInGroup - totalReadmittedInGroup\
+        If totalNonReadmittedInGroup = 0 Then\
+            FPR = 0\
+        Else\
+            FPR = CDbl(nonReadmittedAboveThreshold) / CDbl(totalNonReadmittedInGroup)\
+        End If\
+        \
+        Dim actualReadmRateAbove As Double\
+        If patientsAboveThreshold = 0 Then\
+            actualReadmRateAbove = 0\
+        Else\
+            actualReadmRateAbove = readmittedAboveThreshold / patientsAboveThreshold\
+        End If\
+        \
+        roc_TPR_Array(rocArrayIndex) = TPR\
+        roc_FPR_Array(rocArrayIndex) = FPR\
+        \
+        resultsOutputTable(rocArrayIndex + 1, 1) = currentThreshold\
+        resultsOutputTable(rocArrayIndex + 1, 2) = totalPatientsInGroup\
+        resultsOutputTable(rocArrayIndex + 1, 3) = patientsAboveThreshold\
+        resultsOutputTable(rocArrayIndex + 1, 4) = readmittedAboveThreshold\
+        resultsOutputTable(rocArrayIndex + 1, 5) = nonReadmittedAboveThreshold\
+        resultsOutputTable(rocArrayIndex + 1, 6) = totalPatientsInGroup - patientsAboveThreshold\
+        resultsOutputTable(rocArrayIndex + 1, 7) = totalReadmittedInGroup - readmittedAboveThreshold\
+        resultsOutputTable(rocArrayIndex + 1, 8) = totalNonReadmittedInGroup - nonReadmittedAboveThreshold\
+        resultsOutputTable(rocArrayIndex + 1, 9) = TPR\
+        resultsOutputTable(rocArrayIndex + 1, 10) = FPR\
+        resultsOutputTable(rocArrayIndex + 1, 11) = actualReadmRateAbove\
+        \
+        rocArrayIndex = rocArrayIndex + 1\
+    Next currentThreshold\
+    \
+    Dim maxYodenIndex As Double: maxYodenIndex = -2\
+    statisticalOptimal = 0\
+    resourceOptimal = 0\
+    Dim resourceOptimalFound As Boolean: resourceOptimalFound = False\
+    \
+    For i = 2 To UBound(resultsOutputTable, 1)\
+        Dim currentYouden As Double, currentScreenRatio As Double\
+        currentYouden = resultsOutputTable(i, 9) - resultsOutputTable(i, 10)\
+        If currentYouden > maxYodenIndex Then\
+            maxYodenIndex = currentYouden\
+            statisticalOptimal = resultsOutputTable(i, 1)\
+        End If\
+        If totalPatientsInGroup > 0 Then\
+            currentScreenRatio = resultsOutputTable(i, 3) / resultsOutputTable(i, 2)\
+            If currentScreenRatio <= RESOURCE_TARGET_RATIO And Not resourceOptimalFound Then\
+                resourceOptimal = resultsOutputTable(i, 1)\
+                resourceOptimalFound = True\
+            End If\
+        End If\
+    Next i\
+    \
+    calculatedAUC = 0\
+    For i = 0 To UBound(roc_TPR_Array) - 1\
+        calculatedAUC = calculatedAUC + (roc_FPR_Array(i) - roc_FPR_Array(i + 1)) * (roc_TPR_Array(i) + roc_TPR_Array(i + 1)) / 2\
+    Next i\
+    If calculatedAUC < 0 Then\
+        calculatedAUC = Abs(calculatedAUC)\
+    End If\
+    \
+    summaryStatsString = "Total Patients=" & totalPatientsInGroup & "|Total Readmissions=" & totalReadmittedInGroup & _\
+                         "|Readmission Rate=" & Format(IIf(totalPatientsInGroup = 0, 0, totalReadmittedInGroup / totalPatientsInGroup), "0.00%") & _\
+                         "|Min Score=" & Format(minScore, "0") & "%|Max Score=" & Format(maxScore, "0") & "%" & _\
+                         "|Avg Score=" & Format(avgScore, "0.00") & "%|AUC=" & Format(calculatedAUC, "0.000")\
+                         \
+CleanExit_PerformROC:\
+    Erase scoresArray, resultsArray, roc_TPR_Array, roc_FPR_Array\
+    Exit Sub\
+ErrorHandler_PerformROC:\
+    MsgBox "Error in PerformROCAnalysis: " & Err.Description, vbCritical\
+    ReDim resultsOutputTable(0 To 0, 1 To 1): resultsOutputTable(0, 1) = "Error"\
+    calculatedAUC = 0: summaryStatsString = "Error": statisticalOptimal = -1: resourceOptimal = -1\
+    Resume CleanExit_PerformROC\
+End Sub\
+\
+\
+' --- Output Functions ---\
+Private Function CreateOrClearSheet(sheetName As String) As Worksheet\
+    Dim ws As Worksheet\
+    On Error Resume Next\
+    Set ws = ThisWorkbook.Sheets(sheetName)\
+    On Error GoTo 0\
+    Application.DisplayAlerts = False\
+    If Not ws Is Nothing Then\
+        ws.Cells.Clear\
+        Dim chrt As ChartObject\
+        For Each chrt In ws.ChartObjects\
+            chrt.Delete\
+        Next chrt\
+    Else\
+        Set ws = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))\
+        ws.Name = sheetName\
+    End If\
+    Application.DisplayAlerts = True\
+    Set CreateOrClearSheet = ws\
+End Function\
+\
+Private Sub CreateROCTables(ws As Worksheet, overallRes As Variant, calledRes As Variant, notCalledRes As Variant, ByVal overallStatOpt As Double, ByVal overallResOpt As Double, ByVal calledStatOpt As Double, ByVal calledResOpt As Double, ByVal notCalledStatOpt As Double, ByVal notCalledResOpt As Double)\
+    Dim startRow As Long, rowsInCurrentTable As Long\
+    startRow = 3\
+    Const NUM_TABLE_COLS As Long = 11\
+    Const GROUP_NAME_OVERALL As String = "Overall Group Analysis"\
+    Const GROUP_NAME_FOLLOWUP As String = "Follow-up Group Analysis"\
+    Const GROUP_NAME_NOFOLLOWUP As String = "No Follow-up Group Analysis"\
+    \
+    ws.Cells(startRow, 1).Value = GROUP_NAME_OVERALL\
+    With ws.Range(ws.Cells(startRow, 1), ws.Cells(startRow, NUM_TABLE_COLS))\
+        .HorizontalAlignment = xlCenterAcrossSelection\
+        .Font.Bold = True\
+        .Font.Size = 12\
+        .Interior.Color = RGB(230, 230, 230)\
+        .Borders.LineStyle = xlContinuous\
+    End With\
+    \
+    startRow = startRow + 1\
+    Call WriteTableToSheet(ws, overallRes, startRow, 1)\
+    \
+    If IsArrayEmpty(overallRes) Then\
+        rowsInCurrentTable = 1\
+    Else\
+        rowsInCurrentTable = UBound(overallRes, 1) - LBound(overallRes, 1) + 1\
+    End If\
+    If Not IsArrayEmpty(overallRes) Then\
+        Call HighlightOptimalRows(ws, startRow, rowsInCurrentTable, overallStatOpt, overallResOpt)\
+    End If\
+    startRow = startRow + rowsInCurrentTable + 2\
+    \
+    ws.Cells(startRow, 1).Value = GROUP_NAME_FOLLOWUP\
+    With ws.Range(ws.Cells(startRow, 1), ws.Cells(startRow, NUM_TABLE_COLS))\
+        .HorizontalAlignment = xlCenterAcrossSelection\
+        .Font.Bold = True\
+        .Font.Size = 12\
+        .Interior.Color = RGB(230, 230, 230)\
+        .Borders.LineStyle = xlContinuous\
+    End With\
+    \
+    startRow = startRow + 1\
+    Call WriteTableToSheet(ws, calledRes, startRow, 1)\
+    \
+    If IsArrayEmpty(calledRes) Then\
+        rowsInCurrentTable = 1\
+    Else\
+        rowsInCurrentTable = UBound(calledRes, 1) - LBound(calledRes, 1) + 1\
+    End If\
+    If Not IsArrayEmpty(calledRes) Then\
+        Call HighlightOptimalRows(ws, startRow, rowsInCurrentTable, calledStatOpt, calledResOpt)\
+    End If\
+    startRow = startRow + rowsInCurrentTable + 2\
+    \
+    ws.Cells(startRow, 1).Value = GROUP_NAME_NOFOLLOWUP\
+    With ws.Range(ws.Cells(startRow, 1), ws.Cells(startRow, NUM_TABLE_COLS))\
+        .HorizontalAlignment = xlCenterAcrossSelection\
+        .Font.Bold = True\
+        .Font.Size = 12\
+        .Interior.Color = RGB(230, 230, 230)\
+        .Borders.LineStyle = xlContinuous\
+    End With\
+    \
+    startRow = startRow + 1\
+    Call WriteTableToSheet(ws, notCalledRes, startRow, 1)\
+    \
+    If IsArrayEmpty(notCalledRes) Then\
+        rowsInCurrentTable = 1\
+    Else\
+        rowsInCurrentTable = UBound(notCalledRes, 1) - LBound(notCalledRes, 1) + 1\
+    End If\
+    If Not IsArrayEmpty(notCalledRes) Then\
+        Call HighlightOptimalRows(ws, startRow, rowsInCurrentTable, notCalledStatOpt, notCalledResOpt)\
+    End If\
+    startRow = startRow + rowsInCurrentTable + 2\
+    \
+    ws.Columns("A:K").AutoFit\
+End Sub\
+\
+Private Sub WriteTableToSheet(ws As Worksheet, dataArray As Variant, r As Long, c As Long)\
+    If IsArrayEmpty(dataArray) Then\
+        ws.Cells(r, c).Value = "No data available for this group."\
+        With ws.Range(ws.Cells(r, c), ws.Cells(r, c + 10))\
+            .HorizontalAlignment = xlCenterAcrossSelection\
+            .Font.Italic = True\
+            .VerticalAlignment = xlCenter\
+            .RowHeight = 25\
+            .Borders.LineStyle = xlContinuous\
+        End With\
+        Exit Sub\
+    End If\
+    \
+    Dim rowsCount As Long, colsCount As Long, targetRange As Range\
+    rowsCount = UBound(dataArray, 1) - LBound(dataArray, 1) + 1\
+    colsCount = UBound(dataArray, 2) - LBound(dataArray, 2) + 1\
+    Set targetRange = ws.Range(ws.Cells(r, c), ws.Cells(r + rowsCount - 1, c + colsCount - 1))\
+    targetRange.Value2 = dataArray\
+    \
+    With targetRange\
+        .Borders.LineStyle = xlContinuous\
+        .Rows(1).Font.Bold = True\
+        .Rows(1).Interior.Color = RGB(200, 200, 200)\
+        If .Columns.Count >= 11 Then\
+            .Columns(9).NumberFormat = "0.00%"\
+            .Columns(10).NumberFormat = "0.00%"\
+            .Columns(11).NumberFormat = "0.00%"\
+        End If\
+    End With\
+End Sub\
+\
+Private Sub HighlightOptimalRows(ws As Worksheet, tableTopDataRow As Long, tableTotalDataRows As Long, statThreshold As Double, resThreshold As Double)\
+    Dim i As Long\
+    Const statColor As Long = 65535, resColor As Long = 13561798, bothColor As Long = 49407\
+    \
+    If statThreshold = resThreshold And statThreshold >= 0 Then\
+        For i = tableTopDataRow + 1 To tableTopDataRow + tableTotalDataRows - 1\
+            If CDbl(ws.Cells(i, 1).Value) = statThreshold Then\
+                ws.Range(ws.Cells(i, 1), ws.Cells(i, 11)).Interior.Color = bothColor\
+                Exit For\
+            End If\
+        Next i\
+    Else\
+        For i = tableTopDataRow + 1 To tableTopDataRow + tableTotalDataRows - 1\
+            If statThreshold >= 0 And CDbl(ws.Cells(i, 1).Value) = statThreshold Then\
+                ws.Range(ws.Cells(i, 1), ws.Cells(i, 11)).Interior.Color = statColor\
+            End If\
+            If resThreshold >= 0 And CDbl(ws.Cells(i, 1).Value) = resThreshold Then\
+                ws.Range(ws.Cells(i, 1), ws.Cells(i, 11)).Interior.Color = resColor\
+            End If\
+        Next i\
+    End If\
+End Sub\
+\
+Private Sub CreateROCCharts(ws As Worksheet, overallRes As Variant, calledRes As Variant, notCalledRes As Variant, aucOverall As Double, aucCalled As Double, aucNotCalled As Double)\
+    Dim rocChartObj As ChartObject, barChartObj As ChartObject, chartTop As Double, chartLeft As Double\
+    chartLeft = ws.Columns("L").Left\
+    chartTop = ws.Rows(3).Top\
+    Const CHART_WIDTH As Double = 450, CHART_HEIGHT As Double = 300, CHART_SPACING As Double = 20\
+    \
+    On Error Resume Next\
+    Set rocChartObj = ws.ChartObjects.Add(chartLeft, chartTop, CHART_WIDTH, CHART_HEIGHT)\
+    If Err.Number = 0 Then\
+        With rocChartObj.Chart\
+            .ChartType = xlXYScatterLines\
+            .HasTitle = True\
+            .ChartTitle.Text = "ROC Curves Comparison"\
+            .HasLegend = True\
+            .Legend.Position = xlLegendPositionBottom\
+            If Not IsArrayEmpty(overallRes) Then Call AddROCSeriesToChart(.SeriesCollection.NewSeries, overallRes, "Overall (AUC=" & Format(aucOverall, "0.000") & ")", RGB(70, 130, 180))\
+            If Not IsArrayEmpty(calledRes) Then Call AddROCSeriesToChart(.SeriesCollection.NewSeries, calledRes, "Follow-up Group (AUC=" & Format(aucCalled, "0.000") & ")", RGB(60, 179, 113))\
+            If Not IsArrayEmpty(notCalledRes) Then Call AddROCSeriesToChart(.SeriesCollection.NewSeries, notCalledRes, "No Follow-up Group (AUC=" & Format(aucNotCalled, "0.000") & ")", RGB(255, 99, 71))\
+            If IsArrayEmpty(calledRes) And Not IsArrayEmpty(notCalledRes) Then\
+                With .Shapes.AddTextbox(msoTextOrientationHorizontal, .PlotArea.Left + 20, .PlotArea.Top + 20, 200, 40)\
+                    .TextFrame2.TextRange.Text = "Note: Follow-up Group data not available for the selected filters."\
+                    .TextFrame2.TextRange.Font.Size = 8\
+                    .TextFrame2.TextRange.Font.Italic = msoTrue\
+                    .Line.Visible = msoFalse\
+                    .Fill.Visible = msoFalse\
+                End With\
+            End If\
+            With .SeriesCollection.NewSeries\
+                .XValues = Array(0, 1)\
+                .Values = Array(0, 1)\
+                .Name = "Reference Line"\
+                .Format.Line.DashStyle = msoLineDash\
+                .Format.Line.ForeColor.RGB = RGB(128, 128, 128)\
+                .MarkerStyle = xlMarkerStyleNone\
+            End With\
+            With .Axes(xlCategory, xlPrimary)\
+                .HasTitle = True\
+                .AxisTitle.Text = "False Positive Rate (1-Specificity)"\
+                .MinimumScale = 0\
+                .MaximumScale = 1\
+                .MajorUnit = 0.2\
+            End With\
+            With .Axes(xlValue, xlPrimary)\
+                .HasTitle = True\
+                .AxisTitle.Text = "True Positive Rate (Sensitivity)"\
+                .MinimumScale = 0\
+                .MaximumScale = 1\
+                .MajorUnit = 0.2\
+            End With\
+        End With\
+    End If\
+    On Error GoTo 0\
+    \
+    chartTop = chartTop + CHART_HEIGHT + CHART_SPACING\
+    \
+    On Error Resume Next\
+    Set barChartObj = ws.ChartObjects.Add(chartLeft, chartTop, CHART_WIDTH + 50, CHART_HEIGHT + 20)\
+    If Err.Number = 0 Then\
+        With barChartObj.Chart\
+            .ChartType = xlColumnClustered\
+            .HasTitle = True\
+            .ChartTitle.Text = "Readmission Rate Above Threshold"\
+            .HasLegend = True\
+            .Legend.Position = xlLegendPositionBottom\
+            If Not IsArrayEmpty(calledRes) Then Call AddBarSeriesToChart(.SeriesCollection.NewSeries, calledRes, "Follow-up Group Readm. Rate", RGB(60, 179, 113))\
+            If Not IsArrayEmpty(notCalledRes) Then Call AddBarSeriesToChart(.SeriesCollection.NewSeries, notCalledRes, "No Follow-up Group Readm. Rate", RGB(255, 99, 71))\
+            If IsArrayEmpty(calledRes) And IsArrayEmpty(notCalledRes) Then\
+                With .Shapes.AddTextbox(msoTextOrientationHorizontal, .PlotArea.Left + 20, .PlotArea.Top + 20, 200, 40)\
+                    .TextFrame2.TextRange.Text = "No data available to plot for the selected filters."\
+                    .TextFrame2.TextRange.Font.Size = 9\
+                    .TextFrame2.TextRange.Font.Italic = msoTrue\
+                    .Line.Visible = msoFalse\
+                    .Fill.Visible = msoFalse\
+                End With\
+            End If\
+            With .Axes(xlCategory, xlPrimary)\
+                .HasTitle = True\
+                .AxisTitle.Text = "Risk Score Threshold (%)"\
+            End With\
+            With .Axes(xlValue, xlPrimary)\
+                .HasTitle = True\
+                .AxisTitle.Text = "Actual Readmission Rate (%)"\
+                .TickLabels.NumberFormat = "0.0%"\
+                .MinimumScale = 0\
+                .MaximumScale = 1\
+                .MajorUnit = 0.1\
+            End With\
+        End With\
+    End If\
+    On Error GoTo 0\
+End Sub\
+\
+Private Sub AddROCSeriesToChart(ser As Series, rocDataTable As Variant, seriesName As String, seriesColor As Long)\
+    If IsArrayEmpty(rocDataTable) Then Exit Sub\
+    Dim FPR_Values() As Double, TPR_Values() As Double, i As Long, k As Long, numDataPoints As Long\
+    numDataPoints = UBound(rocDataTable, 1) - LBound(rocDataTable, 1)\
+    If numDataPoints <= 0 Then Exit Sub\
+    ReDim FPR_Values(1 To numDataPoints)\
+    ReDim TPR_Values(1 To numDataPoints)\
+    k = 0\
+    For i = LBound(rocDataTable, 1) + 1 To UBound(rocDataTable, 1)\
+        k = k + 1\
+        If IsNumeric(rocDataTable(i, 10)) Then FPR_Values(k) = CDbl(rocDataTable(i, 10)) Else FPR_Values(k) = 0\
+        If IsNumeric(rocDataTable(i, 9)) Then TPR_Values(k) = CDbl(rocDataTable(i, 9)) Else TPR_Values(k) = 0\
+    Next i\
+    With ser\
+        .Name = seriesName\
+        On Error Resume Next\
+        .XValues = FPR_Values\
+        .Values = TPR_Values\
+        If Err.Number <> 0 Then\
+            Debug.Print "Error ROC Series '" & seriesName & "': " & Err.Description\
+            Err.Clear\
+            Exit Sub\
+        End If\
+        On Error GoTo 0\
+        .MarkerStyle = xlMarkerStyleCircle\
+        .MarkerSize = 5\
+        .Format.Line.Visible = msoTrue\
+        .Format.Line.ForeColor.RGB = seriesColor\
+        .MarkerBackgroundColor = seriesColor\
+        .MarkerForegroundColor = seriesColor\
+    End With\
+End Sub\
+\
+Private Sub AddBarSeriesToChart(ser As Series, rocDataTable As Variant, seriesName As String, seriesColor As Long)\
+    If IsArrayEmpty(rocDataTable) Then Exit Sub\
+    Dim ThresholdCategories() As String, ReadmissionRates() As Double, i As Long, k As Long, numDataPoints As Long\
+    numDataPoints = UBound(rocDataTable, 1) - LBound(rocDataTable, 1)\
+    If numDataPoints <= 0 Then Exit Sub\
+    ReDim ThresholdCategories(1 To numDataPoints): ReDim ReadmissionRates(1 To numDataPoints)\
+    k = 0\
+    For i = LBound(rocDataTable, 1) + 1 To UBound(rocDataTable, 1)\
+        k = k + 1\
+        If IsNumeric(rocDataTable(i, 1)) Then ThresholdCategories(k) = CStr(rocDataTable(i, 1)) & "%" Else ThresholdCategories(k) = "Err"\
+        If IsNumeric(rocDataTable(i, 11)) Then ReadmissionRates(k) = CDbl(rocDataTable(i, 11)) Else ReadmissionRates(k) = 0\
+    Next i\
+    With ser\
+        .Name = seriesName\
+        On Error Resume Next\
+        .XValues = ThresholdCategories\
+        .Values = ReadmissionRates\
+        If Err.Number <> 0 Then\
+            Debug.Print "Error Bar Series '" & seriesName & "': " & Err.Description\
+            Err.Clear\
+            Exit Sub\
+        End If\
+        On Error GoTo 0\
+        .Format.Fill.Visible = msoTrue\
+        .Format.Fill.ForeColor.RGB = seriesColor\
+        .Format.Line.Visible = msoTrue\
+        .Format.Line.ForeColor.RGB = RGB(0, 0, 0)\
+    End With\
+End Sub\
+\
+Private Sub CreateSummaryTable(ws As Worksheet, summaryOverall As String, summaryCalled As String, summaryNotCalled As String)\
+    Dim startRow As Long, i As Long, dictOverall As Object, dictCalled As Object, dictNotCalled As Object, lastUsedRowInColA As Long\
+    On Error Resume Next\
+    lastUsedRowInColA = ws.Cells(ws.Rows.Count, "A").End(xlUp).row\
+    On Error GoTo 0\
+    If lastUsedRowInColA = 0 And ws.Cells(1,1).Value = "" Then\
+        lastUsedRowInColA = 1\
+    End If\
+    startRow = lastUsedRowInColA + 3\
+    ws.Cells(startRow, 1).Value = "Comparative Summary Statistics"\
+    With ws.Range(ws.Cells(startRow, 1), ws.Cells(startRow, 4))\
+        .HorizontalAlignment = xlCenterAcrossSelection\
+        .Font.Bold = True\
+        .Font.Size = 12\
+        .Interior.Color = RGB(230, 230, 230)\
+        .Borders.LineStyle = xlContinuous\
+    End With\
+    startRow = startRow + 1\
+    ws.Cells(startRow, 1) = "Metric"\
+    ws.Cells(startRow, 2) = "Overall Group"\
+    ws.Cells(startRow, 3) = "Follow-up Group"\
+    ws.Cells(startRow, 4) = "No Follow-up Group"\
+    With ws.Range(ws.Cells(startRow, 1), ws.Cells(startRow, 4))\
+        .Font.Bold = True\
+        .Interior.Color = RGB(220, 220, 220)\
+    End With\
+    startRow = startRow + 1\
+    Set dictOverall = ParseSummaryStringToDict(summaryOverall)\
+    Set dictCalled = ParseSummaryStringToDict(summaryCalled)\
+    Set dictNotCalled = ParseSummaryStringToDict(summaryNotCalled)\
+    Dim metricsToDisplay As Variant\
+    metricsToDisplay = Array("Total Patients", "Total Readmissions", "Readmission Rate", "Min Score", "Max Score", "Avg Score", "AUC")\
+    For i = 0 To UBound(metricsToDisplay)\
+        ws.Cells(startRow + i, 1).Value = metricsToDisplay(i)\
+        ws.Cells(startRow + i, 2).Value = GetValueFromDict(dictOverall, metricsToDisplay(i))\
+        ws.Cells(startRow + i, 3).Value = GetValueFromDict(dictCalled, metricsToDisplay(i))\
+        ws.Cells(startRow + i, 4).Value = GetValueFromDict(dictNotCalled, metricsToDisplay(i))\
+    Next i\
+    With ws.Range(ws.Cells(startRow - 1, 1), ws.Cells(startRow + UBound(metricsToDisplay), 4))\
+        .Borders(xlEdgeLeft).LineStyle = xlContinuous\
+        .Borders(xlEdgeRight).LineStyle = xlContinuous\
+        .Borders(xlEdgeTop).LineStyle = xlContinuous\
+        .Borders(xlEdgeBottom).LineStyle = xlContinuous\
+        .Borders(xlInsideVertical).LineStyle = xlContinuous\
+        .Borders(xlInsideHorizontal).LineStyle = xlDot\
+    End With\
+    ws.Columns("A:D").AutoFit\
+    Set dictOverall = Nothing\
+    Set dictCalled = Nothing\
+    Set dictNotCalled = Nothing\
+End Sub\
+\
+Private Sub WriteDataNotes(ws As Worksheet, totalRecords As Long, includedRecords As Long)\
+    Dim startRow As Long\
+    If ws Is Nothing Then Exit Sub\
+    On Error GoTo ErrorHandler_WriteNotes\
+    \
+    On Error Resume Next\
+    startRow = ws.Cells.Find("*", SearchOrder:=xlByRows, SearchDirection:=xlPrevious).Row\
+    If Err.Number <> 0 Then\
+        startRow = 1\
+        Err.Clear\
+    End If\
+    On Error GoTo ErrorHandler_WriteNotes\
+    startRow = startRow + 3\
+    \
+    With ws\
+        .Cells(startRow, 1).Value = "Data Integrity & Exclusions:"\
+        .Cells(startRow, 1).Font.Bold = True\
+        .Cells(startRow, 1).Font.Size = 11\
+        With .Range(.Cells(startRow, 1), .Cells(startRow, 4))\
+            .HorizontalAlignment = xlCenterAcrossSelection\
+            .Interior.Color = RGB(240, 240, 240)\
+            .Borders.LineStyle = xlContinuous\
+        End With\
+        \
+        startRow = startRow + 1\
+        .Cells(startRow, 1).Value = "Total records found for the selected filters:"\
+        .Cells(startRow, 2).Value = totalRecords\
+        \
+        startRow = startRow + 1\
+        .Cells(startRow, 1).Value = "Records excluded due to missing Risk Score:"\
+        .Cells(startRow, 2).Value = totalRecords - includedRecords\
+        \
+        startRow = startRow + 1\
+        .Cells(startRow, 1).Value = "Records included in this analysis:"\
+        .Cells(startRow, 2).Value = includedRecords\
+        .Cells(startRow, 2).Font.Bold = True\
+        \
+        With .Range("A" & startRow - 2 & ":B" & startRow)\
+            .Borders.LineStyle = xlContinuous\
+            .Columns.AutoFit\
+        End With\
+        \
+        startRow = startRow + 2\
+        .Cells(startRow, 1).Value = "Highlight Legend:"\
+        .Cells(startRow, 1).Font.Bold = True\
+        \
+        startRow = startRow + 1\
+        .Cells(startRow, 1).Interior.Color = RGB(255, 255, 0)\
+        .Cells(startRow, 2).Value = "Statistical Optimal Threshold (Maximizes TPR - FPR)"\
+        \
+        startRow = startRow + 1\
+        .Cells(startRow, 1).Interior.Color = RGB(144, 238, 144)\
+        .Cells(startRow, 2).Value = "Resource Optimal Threshold (Screening Ratio <= 20%)"\
+        \
+        startRow = startRow + 1\
+        .Cells(startRow, 1).Interior.Color = RGB(255, 165, 0)\
+        .Cells(startRow, 2).Value = "Both Statistical & Resource Optimal Threshold"\
+        \
+        .Columns("A:C").AutoFit\
+    End With\
+    \
+CleanExit_WriteNotes:\
+    Exit Sub\
+ErrorHandler_WriteNotes:\
+    MsgBox "An error occurred in WriteDataNotes: " & Err.Description, vbExclamation\
+    Resume CleanExit_WriteNotes\
+End Sub\
+\
+Private Function ParseSummaryStringToDict(summaryString As String) As Object\
+    Dim dict As Object\
+    Set dict = CreateObject("Scripting.Dictionary")\
+    dict.CompareMode = vbTextCompare\
+    \
+    If Len(summaryString) = 0 Then\
+        Set ParseSummaryStringToDict = dict\
+        Exit Function\
+    End If\
+    \
+    Dim pairs As Variant, pair As Variant, i As Long\
+    pairs = Split(summaryString, "|")\
+    For i = 0 To UBound(pairs)\
+        pair = Split(pairs(i), "=")\
+        If UBound(pair) = 1 Then\
+            If Not dict.Exists(Trim(pair(0))) Then\
+                dict.Add Trim(pair(0)), Trim(pair(1))\
+            Else\
+                dict(Trim(pair(0))) = Trim(pair(1))\
+            End If\
+        End If\
+    Next i\
+    Set ParseSummaryStringToDict = dict\
+End Function\
+\
+Private Function GetValueFromDict(dict As Object, ByVal key As Variant) As String\
+    Dim sKey As String\
+    If dict Is Nothing Then\
+        GetValueFromDict = "N/A"\
+        Exit Function\
+    End If\
+    \
+    On Error Resume Next\
+    sKey = CStr(key)\
+    If Err.Number <> 0 Then\
+        GetValueFromDict = "N/A (Key Error)"\
+        Err.Clear\
+        On Error GoTo 0\
+        Exit Function\
+    End If\
+    On Error GoTo 0\
+    \
+    If dict.Exists(sKey) Then\
+        GetValueFromDict = CStr(dict(sKey))\
+    Else\
+        GetValueFromDict = "N/A"\
+    End If\
+End Function\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+' Code for the "Control Panel" Worksheet Module\
+Option Explicit\
+\
+Private Sub Worksheet_Change(ByVal Target As Range)\
+    Dim dropdownsRange As Range\
+    Set dropdownsRange = Me.Range("B11,D11,F11")\
+    \
+    ' Check if the changed cell is one of our dropdowns and it's a single cell change\
+    If Not Intersect(Target, dropdownsRange) Is Nothing Then\
+        If Target.Cells.CountLarge = 1 Then\
+            ' Disable events to prevent recursive calls while dropdowns are updated\
+            Application.EnableEvents = False\
+            On Error GoTo CleanExit_Change\
+            \
+            ' Call the main update logic in Module 1\
+            ControlPanel.UpdateDropdowns\
+            \
+CleanExit_Change:\
+            ' Always re-enable events, even if an error occurred in UpdateDropdowns\
+            Application.EnableEvents = True\
+            If Err.Number <> 0 Then\
+                MsgBox "An error occurred while updating the dropdown lists: " & Err.Description, vbExclamation\
+            End If\
+        End If\
+    End If\
+    \
+    Set dropdownsRange = Nothing\
+End Sub}
